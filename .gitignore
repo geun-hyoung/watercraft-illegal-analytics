@@ -60,3 +60,6 @@ runs/
 outputs/
 results_onboat/
 
+# Model directory
+model/
+
