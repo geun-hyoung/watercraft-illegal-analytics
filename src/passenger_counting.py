@@ -9,8 +9,8 @@
 # - IoU(Intersection over Union) 기반으로 중복 탐지된 바운딩박스를 병합
 # - 각 보트별로 탑승한 인원수를 계산하여 결과 이미지에 시각화
 #
-# 입력: data/test/plate_detection/ 폴더의 이미지 파일들
-# 출력: results_onboat/ 폴더에 결과 이미지 저장
+# 입력: result/boat_classification/ 폴더의 보트 유형 분류 결과 이미지 파일들
+# 출력: result/passenger_counting/ 폴더에 결과 이미지 저장
 # =============================================================
 
 import os
@@ -207,29 +207,38 @@ def visualize_and_save(img, boats, img_name):
     # 결과 저장 폴더 생성 및 이미지 저장
     # 프로젝트 루트 기준 절대 경로 사용
     base_dir = os.path.dirname(os.path.dirname(__file__))
-    out_dir = os.path.join(base_dir, "results_onboat")
+    out_dir = os.path.join(base_dir, "result", "passenger_counting")
     os.makedirs(out_dir, exist_ok=True)
     cv2.imwrite(os.path.join(out_dir, img_name), result)
 
 # =========================
 # 9. 테스트 데이터셋 실행
 # =========================
-# data/test/plate_detection/ 폴더의 모든 이미지에 대해 승선 인원수 탐지 수행
-# plate_detection과 동일한 테스트 데이터셋을 사용
+# result/boat_classification/ 폴더의 보트 유형 분류 결과 이미지에 대해 승선 인원수 탐지 수행
 def test_on_dataset():
-    # 테스트 데이터 경로: plate_detection과 동일한 테스트 데이터셋 사용
+    # 보트 유형 분류 결과 이미지 경로 사용
     base_dir = os.path.dirname(os.path.dirname(__file__))
-    test_path = os.path.join(base_dir, "data", "test", "plate_detection")
+    boat_classification_result_dir = os.path.join(base_dir, "result", "boat_classification")
     
-    # 테스트 폴더 존재 확인
-    if not os.path.exists(test_path):
-        print(f"[INFO] 테스트 폴더가 없습니다: {test_path}")
-        print("[INFO] 테스트 이미지를 해당 폴더에 넣어주세요.")
+    # 결과 폴더 존재 확인
+    if not os.path.exists(boat_classification_result_dir):
+        print(f"[INFO] 보트 유형 분류 결과 폴더가 없습니다: {boat_classification_result_dir}")
+        print("[INFO] 먼저 보트 유형 분류를 실행해주세요.")
         return
     
-    # 모든 이미지 파일 찾기
-    image_files = glob.glob(os.path.join(test_path, "*.*"))
-    print(f"[INFO] 처리할 이미지: {len(image_files)}개")
+    # 보트 유형 분류 결과 이미지 파일 찾기 (*_result.jpg)
+    image_files = glob.glob(os.path.join(boat_classification_result_dir, "*_result.jpg"))
+    if not image_files:
+        # 결과 이미지가 없으면 원본 테스트 이미지 사용
+        test_path = os.path.join(base_dir, "data", "test")
+        if os.path.exists(test_path):
+            image_files = glob.glob(os.path.join(test_path, "*.jpg")) + glob.glob(os.path.join(test_path, "*.png"))
+            print(f"[INFO] 보트 유형 분류 결과가 없어 원본 이미지를 사용합니다: {len(image_files)}개")
+        else:
+            print(f"[INFO] 테스트 이미지 폴더가 없습니다: {test_path}")
+            return
+    else:
+        print(f"[INFO] 보트 유형 분류 결과 이미지 사용: {len(image_files)}개")
 
     # 각 이미지에 대해 처리
     for path in sorted(image_files):
@@ -243,8 +252,10 @@ def test_on_dataset():
         # 보트별 탑승 인원 매칭
         boats = match_people_to_boats(persons, boats)
         # 결과 시각화 및 저장
-        visualize_and_save(img, boats, os.path.basename(path))
-        print(f"[INFO] 처리 완료: {os.path.basename(path)} - 보트 {len(boats)}개, 총 탑승 인원 {sum(len(b['persons']) for b in boats)}명")
+        # 파일명에서 _result 제거하여 원본 이름으로 저장
+        img_name = os.path.basename(path).replace("_result.jpg", ".jpg").replace("_result.png", ".png")
+        visualize_and_save(img, boats, img_name)
+        print(f"[INFO] 처리 완료: {img_name} - 보트 {len(boats)}개, 총 탑승 인원 {sum(len(b['persons']) for b in boats)}명")
 
 # =========================
 # 10. 메인 실행부

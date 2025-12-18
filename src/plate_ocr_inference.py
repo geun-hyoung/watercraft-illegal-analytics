@@ -9,7 +9,7 @@
 # - 다양한 전처리 기법 적용 (회전, 크기 조정, 감마 보정 등)
 # - 결과를 CSV 파일과 시각화 이미지로 저장
 #
-# 입력: data/test/plate_detection/ 폴더의 이미지 파일들
+# 입력: data/test/ 폴더의 이미지 파일들
 # 출력: runs/ocr/OCR_FINAL_1029/ 폴더에 결과 저장
 # =============================================================
 
@@ -24,7 +24,7 @@ print(f"[INFO] Ultralytics {ultralytics.__version__}")
 # 프로젝트 루트 기준으로 경로 설정
 BASE_DIR = Path(__file__).parent.parent
 WEIGHT_PATH = BASE_DIR / "model" / "plate_detection_baseline.pt"
-SOURCE_DIR = BASE_DIR / "data" / "test" / "plate_detection"
+SOURCE_DIR = BASE_DIR / "data" / "test"
 OUT_ROOT    = BASE_DIR / "runs" / "ocr" / "OCR_FINAL_1029"           # 결과 루트
 CONF_THRES  = 0.25
 IOU_THRES   = 0.5
@@ -213,6 +213,9 @@ def _to_digits(s: str) -> str:
     return ''.join(out)
 
 # 3) 패턴 검사 로직(자리 고정)으로 교체: AA-00-0000 / 00-AA-0000
+# 노이즈 제거 및 향상된 정규화 로직 포함
+NOISE_PREFIX = set(['I', '1', '|', '!', 'L'])  # 맨 앞 노이즈 한 글자 방어용 (있으면 삭제 후보 생성)
+
 def _normalize_candidate(raw: str):
     if not raw:
         return "", "", False, 0
@@ -222,152 +225,83 @@ def _normalize_candidate(raw: str):
 
     s_flat = re.sub(r'[\s\-]+', '', s)
 
+    streams = [s_flat]
+
+    # 4-1) 맨 앞 노이즈 한 글자 제거 스트림 추가 (예: I|1L 등)
+    if len(s_flat) >= 1 and s_flat[0] in NOISE_PREFIX:
+        streams.append(s_flat[1:])
+
+    # 4-2) 앞 3글자가 모두 알파벳이면 AB/BC 접두 스트림 추가
+    if len(s_flat) >= 3 and s_flat[:3].isalpha():
+        letters3 = s_flat[:3]
+        rest = s_flat[3:]
+        # AB + rest  (3번째 글자 제거)
+        streams.append(letters3[:2] + rest)
+        # BC + rest  (1번째 글자 제거)
+        streams.append(letters3[1:] + rest)
+
+    # (선택) 너무 길면 8자 슬라이딩 윈도 스트림도 후보에 추가
+    if len(s_flat) > 8:
+        for st in (streams.copy()):  # 기존 후보 각각에 대해 8자 창 생성
+            for k in range(0, len(st) - 8 + 1):
+                streams.append(st[k:k + 8])
+
+    # 중복 제거(정렬 유지 X)
+    seen = set()
+    uniq_streams = []
+    for t in streams:
+        if t not in seen:
+            uniq_streams.append(t)
+            seen.add(t)
+
     def try_AA00_0000(t: str):
-        if len(t) != 8:
-            return None
+        if len(t) != 8: return None
         aa = _to_letters(t[0:2])
         d2 = _to_digits(t[2:4])
         d4 = _to_digits(t[4:8])
-
         if not (aa.isalpha() and len(aa) == 2): return None
         if not (d2.isdigit() and len(d2) == 2): return None
         if not (d4.isdigit() and len(d4) == 4): return None
-
-        # 허용 접두만 채택
-        if aa not in ALLOWED_PREFIX:
-            return None
-
+        if aa not in ALLOWED_PREFIX: return None
         norm = f"{aa}-{d2}-{d4}"
         repl = sum(x != y for x, y in zip(t, aa + d2 + d4))
         return (norm, "AA-00-0000", True, repl)
 
     def try_00AA_0000(t: str):
-        if len(t) != 8:
-            return None
+        if len(t) != 8: return None
         d2 = _to_digits(t[0:2])
         aa = _to_letters(t[2:4])
         d4 = _to_digits(t[4:8])
-
         if not (d2.isdigit() and len(d2) == 2): return None
         if not (aa.isalpha() and len(aa) == 2): return None
         if not (d4.isdigit() and len(d4) == 4): return None
-
-        if aa not in ALLOWED_PREFIX:
-            return None
-
+        if aa not in ALLOWED_PREFIX: return None
         norm = f"{d2}-{aa}-{d4}"
         repl = sum(x != y for x, y in zip(t, d2 + aa + d4))
         return (norm, "00-AA-0000", True, repl)
 
     cand = []
-    r1 = try_AA00_0000(s_flat)
-    if r1: cand.append(r1)
-    r2 = try_00AA_0000(s_flat)
-    if r2: cand.append(r2)
+    for t in uniq_streams:
+        r1 = try_AA00_0000(t)
+        if r1: cand.append(r1)
+        r2 = try_00AA_0000(t)
+        if r2: cand.append(r2)
 
     if not cand:
         tokens = re.split(r'[\s\-]+', s)
         if 1 <= len(tokens) <= 3:
             t2 = ''.join(tokens)
-            r1 = try_AA00_0000(t2)
-            if r1: cand.append(r1)
-            r2 = try_00AA_0000(t2)
-            if r2: cand.append(r2)
+            for t in [t2]:
+                r1 = try_AA00_0000(t)
+                r2 = try_00AA_0000(t)
+                if r1: cand.append(r1)
+                if r2: cand.append(r2)
 
     if not cand:
         return "", "", False, 0
 
     cand.sort(key=lambda x: (not x[2], x[3]))  # is_valid 우선, 교정 적을수록
     return cand[0]
-
-    NOISE_PREFIX = set(['I', '1', '|', '!', 'L'])  # 맨 앞 노이즈 한 글자 방어용 (있으면 삭제 후보 생성)
-
-    def _normalize_candidate(raw: str):
-        if not raw:
-            return "", "", False, 0
-        s = _strip_junk(raw)
-        if not s:
-            return "", "", False, 0
-
-        s_flat = re.sub(r'[\s\-]+', '', s)
-
-        streams = [s_flat]
-
-        # 4-1) 맨 앞 노이즈 한 글자 제거 스트림 추가 (예: I|1L 등)
-        if len(s_flat) >= 1 and s_flat[0] in NOISE_PREFIX:
-            streams.append(s_flat[1:])
-
-        # 4-2) 앞 3글자가 모두 알파벳이면 AB/BC 접두 스트림 추가
-        if len(s_flat) >= 3 and s_flat[:3].isalpha():
-            letters3 = s_flat[:3]
-            rest = s_flat[3:]
-            # AB + rest  (3번째 글자 제거)
-            streams.append(letters3[:2] + rest)
-            # BC + rest  (1번째 글자 제거)
-            streams.append(letters3[1:] + rest)
-
-        # (선택) 너무 길면 8자 슬라이딩 윈도 스트림도 후보에 추가
-        if len(s_flat) > 8:
-            for st in (streams.copy()):  # 기존 후보 각각에 대해 8자 창 생성
-                for k in range(0, len(st) - 8 + 1):
-                    streams.append(st[k:k + 8])
-
-        # 중복 제거(정렬 유지 X)
-        seen = set();
-        uniq_streams = []
-        for t in streams:
-            if t not in seen:
-                uniq_streams.append(t);
-                seen.add(t)
-
-        def try_AA00_0000(t: str):
-            if len(t) != 8: return None
-            aa = _to_letters(t[0:2]);
-            d2 = _to_digits(t[2:4]);
-            d4 = _to_digits(t[4:8])
-            if not (aa.isalpha() and len(aa) == 2): return None
-            if not (d2.isdigit() and len(d2) == 2): return None
-            if not (d4.isdigit() and len(d4) == 4): return None
-            if aa not in ALLOWED_PREFIX: return None
-            norm = f"{aa}-{d2}-{d4}"
-            repl = sum(x != y for x, y in zip(t, aa + d2 + d4))
-            return (norm, "AA-00-0000", True, repl)
-
-        def try_00AA_0000(t: str):
-            if len(t) != 8: return None
-            d2 = _to_digits(t[0:2]);
-            aa = _to_letters(t[2:4]);
-            d4 = _to_digits(t[4:8])
-            if not (d2.isdigit() and len(d2) == 2): return None
-            if not (aa.isalpha() and len(aa) == 2): return None
-            if not (d4.isdigit() and len(d4) == 4): return None
-            if aa not in ALLOWED_PREFIX: return None
-            norm = f"{d2}-{aa}-{d4}"
-            repl = sum(x != y for x, y in zip(t, d2 + aa + d4))
-            return (norm, "00-AA-0000", True, repl)
-
-        cand = []
-        for t in uniq_streams:
-            r1 = try_AA00_0000(t)
-            if r1: cand.append(r1)
-            r2 = try_00AA_0000(t)
-            if r2: cand.append(r2)
-
-        if not cand:
-            tokens = re.split(r'[\s\-]+', s)
-            if 1 <= len(tokens) <= 3:
-                t2 = ''.join(tokens)
-                for t in [t2]:
-                    r1 = try_AA00_0000(t);
-                    r2 = try_00AA_0000(t)
-                    if r1: cand.append(r1)
-                    if r2: cand.append(r2)
-
-        if not cand:
-            return "", "", False, 0
-
-        cand.sort(key=lambda x: (not x[2], x[3]))  # is_valid 우선, 교정 적을수록
-        return cand[0]
 
 def choose_best_text(ocr_result):
     if not ocr_result:
